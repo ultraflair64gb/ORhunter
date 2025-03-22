@@ -1,4 +1,3 @@
-
 import sys
 import subprocess
 import requests
@@ -8,6 +7,7 @@ import threading
 import urllib.parse as urlparse
 import numpy as np
 import requests.packages.urllib3
+import random
 requests.packages.urllib3.disable_warnings()
 
 BLUE, RED, WHITE, YELLOW, MAGENTA, GREEN, END = '\33[94m', '\033[91m', '\33[97m', '\33[93m', '\033[1;35m', '\033[1;32m', '\033[0m'
@@ -46,6 +46,45 @@ def readTargetFromFile(filepath):
 
     return urls_list  
 
+def load_user_agents():
+    try:
+        with open('useragent.txt', 'r') as f:
+            return [line.strip() for line in f if line.strip()]
+    except FileNotFoundError:
+        print(f"{RED}[!] useragent.txt not found. Using default user agent.{END}")
+        return ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36']
+
+def load_proxies():
+    try:
+        with open('proxy.txt', 'r') as f:
+            return [line.strip() for line in f if line.strip()]
+    except FileNotFoundError:
+        print(f"{RED}[!] proxy.txt not found. Running without proxies.{END}")
+        return []
+
+def format_proxy(proxy_string):
+    """
+    Format proxy string (IP:PORT:USERNAME:PASSWORD) into proper proxy URL with authentication
+    """
+    try:
+        ip, port, username, password = proxy_string.split(':')
+        return f'http://{username}:{password}@{ip}:{port}'
+    except:
+        return None
+
+def get_random_proxy():
+    proxies = load_proxies()
+    if not proxies:
+        return None
+    proxy = random.choice(proxies)
+    formatted_proxy = format_proxy(proxy)
+    if not formatted_proxy:
+        return None
+    return {
+        'http': formatted_proxy,
+        'https': formatted_proxy
+    }
+
 class PassiveCrawl:
     def __init__(self, domain, want_subdomain, threadNumber, deepcrawl):
         self.domain = domain
@@ -53,6 +92,8 @@ class PassiveCrawl:
         self.deepcrawl = deepcrawl            #Bool
         self.threadNumber = threadNumber
         self.final_url_list = []
+        self.user_agents = load_user_agents()
+        self.proxies = load_proxies()
     
     def start(self):
         if self.deepcrawl:
@@ -90,10 +131,24 @@ class PassiveCrawl:
         return final_list
 
     def make_GET_Request(self, url, response_type):
-        response = requests.get(url)
+        headers = {'User-Agent': random.choice(self.user_agents)}
+        proxies = get_random_proxy()
+        
+        try:
+            response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=10)
+        except (requests.exceptions.RequestException, requests.exceptions.Timeout):
+            # If proxy fails, try without proxy
+            try:
+                response = requests.get(url, headers=headers, verify=False, timeout=10)
+            except:
+                print(f"{RED}[!] Failed to connect to {url}{END}")
+                return None
         
         if response_type.lower() == "json":
-            result = response.json()
+            try:
+                result = response.json()
+            except:
+                result = None
         else:
             result = response.text
         
@@ -107,8 +162,13 @@ class PassiveCrawl:
                
         url = f"http://web.archive.org/cdx/search/cdx?url={wild_card+domain}/*&output=json&collapse=urlkey&fl=original"  
         urls_list = self.make_GET_Request(url, "json")
+        
+        if urls_list is None:
+            print(f"{RED}[!] Failed to get URLs from Wayback Machine{END}")
+            return []
+            
         try:
-            urls_list.pop(0)
+            urls_list.pop(0)  # Remove header row
         except:
             pass
         
@@ -121,7 +181,16 @@ class PassiveCrawl:
     def getOTX_URLs(self, domain):
         url = f"https://otx.alienvault.com/api/v1/indicators/hostname/{domain}/url_list"
         raw_urls = self.make_GET_Request(url, "json")
-        urls_list = raw_urls["url_list"]
+        
+        if raw_urls is None:
+            print(f"{RED}[!] Failed to get URLs from AlienVault OTX{END}")
+            return []
+            
+        try:
+            urls_list = raw_urls["url_list"]
+        except:
+            print(f"{RED}[!] Invalid response format from AlienVault OTX{END}")
+            return []
         
         final_urls_list = []
         for url in urls_list:
@@ -182,6 +251,8 @@ class OpenRedirectScanner:
         self.total_urls_scanned = 0
         self.unique_potential_urls = 0
         self.total_error_encountered = 0
+        self.user_agents = load_user_agents()
+        self.proxies = load_proxies()
         
     def start(self):
         #===================================================================================================
@@ -277,7 +348,19 @@ class OpenRedirectScanner:
     def scan_urls_for_open_redirect(self, url_list, domainNameOfTarget):
         for url in url_list:
             try:
-                r = requests.get(str(url), allow_redirects=False, verify=False)
+                headers = {'User-Agent': random.choice(self.user_agents)}
+                proxies = get_random_proxy()
+                
+                try:
+                    r = requests.get(str(url), headers=headers, proxies=proxies, allow_redirects=False, verify=False, timeout=10)
+                except (requests.exceptions.RequestException, requests.exceptions.Timeout):
+                    # If proxy fails, try without proxy
+                    try:
+                        r = requests.get(str(url), headers=headers, allow_redirects=False, verify=False, timeout=10)
+                    except:
+                        self.total_error_encountered += 1
+                        continue
+                
                 if r.status_code in [301, 302, 303, 304, 305, 306, 307, 308]:
                     if ("evil.com" in r.headers["Location"]) and ("=http://evil.com" not in r.headers["Location"]) and (domainNameOfTarget not in r.headers["Location"]):
                         self.vulnerable_urls.append(url)
